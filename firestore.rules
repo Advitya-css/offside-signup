@@ -1,0 +1,79 @@
+rules_version = '2';
+
+// Offside Social · club sign-up.
+// Paste this whole file into Firebase → Firestore Database → Rules, then press Publish.
+// Change the email on the ORGANISER line to the Google account you will use for ?admin.
+//
+// What each collection holds:
+//   players/{uid}  name + time            everyone can read (the "Who's picked so far" list)
+//   taken/{club}   empty                  everyone can read (so a taken club can't be picked)
+//   claims/{club}  who owns the club      only the organiser can read
+//   mine/{uid}     that person's club     only that person and the organiser can read
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function organiser() {
+      return request.auth != null
+        && request.auth.token.get('email', '') == 'YOUR-EMAIL@gmail.com'   // ORGANISER
+        && request.auth.token.get('email_verified', false) == true;
+    }
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+    function minePath(u)    { return /databases/$(database)/documents/mine/$(u); }
+    function claimPath(c)   { return /databases/$(database)/documents/claims/$(c); }
+    function takenPath(c)   { return /databases/$(database)/documents/taken/$(c); }
+
+    match /players/{uid} {
+      allow read: if true;
+      allow create: if signedIn() && me() == uid
+        && request.resource.data.keys().hasOnly(['name', 'at'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 24
+        && request.resource.data.at == request.time
+        && existsAfter(minePath(uid));
+      allow update: if signedIn() && me() == uid
+        && request.resource.data.keys().hasOnly(['name', 'at'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 24
+        && request.resource.data.at == resource.data.at
+        && existsAfter(minePath(uid));
+      allow delete: if (signedIn() && me() == uid) || organiser();
+    }
+
+    match /taken/{club} {
+      allow read: if true;
+      allow create: if signedIn()
+        && request.resource.data.size() == 0
+        && getAfter(claimPath(club)).data.owner == me();
+      allow delete: if organiser()
+        || (signedIn()
+            && !existsAfter(claimPath(club))
+            && get(claimPath(club)).data.owner == me());
+    }
+
+    match /claims/{club} {
+      allow read: if organiser();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['owner'])
+        && request.resource.data.owner == me()
+        && existsAfter(takenPath(club))
+        && getAfter(minePath(me())).data.clubId == club
+        // one club per person: any club they held before must be released in the same save
+        && (!exists(minePath(me()))
+            || !existsAfter(claimPath(get(minePath(me())).data.clubId)));
+      allow delete: if organiser() || (signedIn() && resource.data.owner == me());
+    }
+
+    match /mine/{uid} {
+      allow read: if (signedIn() && me() == uid) || organiser();
+      allow create, update: if signedIn() && me() == uid
+        && request.resource.data.keys().hasOnly(['clubId'])
+        && request.resource.data.clubId is string
+        && getAfter(claimPath(request.resource.data.clubId)).data.owner == uid;
+      allow delete: if (signedIn() && me() == uid) || organiser();
+    }
+  }
+}
